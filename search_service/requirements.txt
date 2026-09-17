@@ -1,0 +1,6 @@
+# torch 不在这里：由 安装.bat 按显卡情况单独装（Pascal 需要 cu126/cu118 轮子）
+transformers>=4.44,<5
+pillow>=10
+numpy>=1.26,<3
+safetensors>=0.4
+huggingface-hub>=0.24

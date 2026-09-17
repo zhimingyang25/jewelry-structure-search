@@ -1,0 +1,16 @@
+/* 同款检索新增样式；基础样式沿用 styles.css */
+.indexBar { display: flex; align-items: center; gap: 10px; margin-top: 6px; font-size: 13px; color: var(--muted); }
+button.small { padding: 4px 10px; font-size: 12px; }
+button.secondary { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+.serviceNote { color: #a33; font-size: 13px; margin: 6px 0 0; min-height: 1em; }
+.categoryNote { font-size: 13px; color: var(--muted); margin: -6px 0 8px; min-height: 1em; }
+.hint { font-size: 12px; color: var(--muted); line-height: 1.5; margin-top: 12px; }
+.notice { padding: 12px 16px; border-radius: 10px; margin-bottom: 12px; font-size: 15px; line-height: 1.5; border: 1px solid var(--line); background: var(--panel); }
+.notice.warn { background: #fff3ea; border-color: #e6a06b; color: #8a3d0d; font-weight: 600; }
+.notice.info { background: #eef6f5; border-color: #9fcac5; color: #1f5a55; }
+.notice small { display: block; font-weight: 400; color: var(--muted); margin-top: 4px; }
+.card .score { font-size: 12px; color: var(--muted); }
+.card .rank { position: absolute; top: 6px; left: 6px; background: rgba(0,0,0,0.55); color: #fff; font-size: 12px; padding: 2px 6px; border-radius: 6px; }
+.card { position: relative; }
+.openErr { color: #a33; font-size: 12px; }

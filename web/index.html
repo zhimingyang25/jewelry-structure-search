@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>珠宝同款检索</title>
+    <link rel="stylesheet" href="/styles.css">
+    <link rel="stylesheet" href="/search.css">
+  </head>
+  <body>
+    <main>
+      <section class="topbar">
+        <div>
+          <h1>珠宝同款检索</h1>
+          <p id="status">正在连接…</p>
+          <div id="indexBar" class="indexBar">
+            <span id="indexText"></span>
+            <button id="indexStartBtn" class="small" hidden>开始认图</button>
+            <button id="indexStopBtn" class="small" hidden>停止</button>
+          </div>
+          <p id="serviceNote" class="serviceNote"></p>
+        </div>
+        <div class="searchbox">
+          <input id="scanRoot" placeholder="图库文件夹路径，例如 D:\your-jewelry-images">
+          <button id="scanBtn">扫描图库</button>
+        </div>
+      </section>
+
+      <section class="workspace">
+        <aside class="panel">
+          <h2>客人图</h2>
+          <input id="upload" type="file" accept="image/jpeg,image/png,image/gif,image/webp,image/bmp,.bmp">
+          <img id="preview" alt="">
+          <button id="searchBtn" disabled>找同款</button>
+
+          <label>品类
+            <select id="category">
+              <option value="auto">自动判断</option>
+            </select>
+          </label>
+          <div id="categoryNote" class="categoryNote"></div>
+          <button id="researchBtn" class="secondary" disabled>按这个品类重搜</button>
+
+          <div id="actionStatus" class="actionStatus"></div>
+          <p class="hint">系统不判断同款，请自行看图。列表越上面越像，最多约 100 张。点「打开所在位置」跳到文件。</p>
+        </aside>
+
+        <section class="results">
+          <div id="notice" class="notice" hidden></div>
+          <div class="resultHeader">
+            <h2>结果</h2>
+            <span id="count"></span>
+          </div>
+          <div id="grid" class="grid"></div>
+        </section>
+      </section>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+</html>

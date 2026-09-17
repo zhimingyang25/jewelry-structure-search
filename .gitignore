@@ -1,0 +1,35 @@
+node_modules/
+
+# Environment / secrets
+.env
+.env.*
+.env*
+*.env
+
+# Local configuration
+config.json
+
+# Real local data
+data/images.json
+data/structure-tags.json
+data/tag-failures.json
+data/index/
+data/converted-images/
+
+# Local backup
+backup_public_version/
+
+# Logs / temporary files
+logs/
+temp/
+
+# Python environment / generated files
+.venv/
+models/
+__pycache__/
+*.pyc
+
+# Local/internal docs
+IMPLEMENT-PROMPT.md
+docs/metadata.json
+run.bat

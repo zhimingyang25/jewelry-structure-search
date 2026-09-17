@@ -1,0 +1,20 @@
+{
+  "name": "jewelry-structure-search",
+  "version": "0.2.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "scan": "node src/scan.mjs",
+    "start": "node src/server.mjs",
+    "index": ".venv\\Scripts\\python.exe -m search_service.build_index",
+    "bench": ".venv\\Scripts\\python.exe -m search_service.bench --n=200",
+    "smoke": ".venv\\Scripts\\python.exe -m search_service.smoke --n=20",
+    "eval": ".venv\\Scripts\\python.exe -m search_service.eval --pairs=eval/pairs.json",
+    "tag:openai": "node src/tag-openai.mjs",
+    "repair:tags": "node src/repair-tags.mjs",
+    "compact:tags": "node src/compact-tags.mjs"
+  },
+  "optionalDependencies": {
+    "sharp": "^0.34.0"
+  }
+}
