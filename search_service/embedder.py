@@ -102,6 +102,8 @@ class QueryEmbedding:
 
 class Embedder:
     def __init__(self, cfg: SearchConfig):
+        import threading
+
         import torch
         from transformers import AutoModel
 
@@ -109,31 +111,45 @@ class Embedder:
         self.torch = torch
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         path = resolve_model_path(cfg, cfg.embed_model)
-        # eager 注意力才能拿到 attention 矩阵算前景框
-        self.model = AutoModel.from_pretrained(path, attn_implementation="eager").to(self.device).eval()
+        # 用默认的 sdpa 注意力（快、省显存）。前景框需要的「最后一层 CLS→patch 注意力」不走 output_attentions
+        # （那会把 12 层注意力全留在显存里，16 张一批要 10 GB），而是钩住最后一层自注意力的输入自己算一行。
+        self.model = AutoModel.from_pretrained(path).to(self.device).eval()
+        self._last_sa = self.model.encoder.layer[-1].attention.attention
+        self._last_attn_input = None
+        self._last_sa.register_forward_pre_hook(self._capture_attn_input, with_kwargs=True)
+        self._forward_lock = threading.Lock()  # 建索引线程与查询线程可能同时前向，钩子状态不能串
         self.patch = int(getattr(self.model.config, "patch_size", 14))
         self.side = cfg.input_size - (cfg.input_size % self.patch)
         self.grid = self.side // self.patch
         self.dim = int(self.model.config.hidden_size) * 2
         self.tta_views = cfg.tta_views_gpu if self.device == "cuda" else cfg.tta_views_cpu
 
+    def _capture_attn_input(self, module, args, kwargs):
+        self._last_attn_input = args[0] if args else kwargs.get("hidden_states")
+
+    def _cls_attention(self, n_special: int) -> np.ndarray:
+        """最后一层 CLS 对各 patch 的注意力（各头平均）→ [B, grid, grid]。只算 CLS 这一行，显存开销可忽略。"""
+        sa, h = self._last_sa, self._last_attn_input
+        B, T, _ = h.shape
+        nh, hd = sa.num_attention_heads, sa.attention_head_size
+        q = sa.query(h[:, :1]).view(B, 1, nh, hd).transpose(1, 2)  # [B, nh, 1, hd]
+        k = sa.key(h).view(B, T, nh, hd).transpose(1, 2)  # [B, nh, T, hd]
+        attn = ((q @ k.transpose(-1, -2)) * sa.scaling).softmax(-1).mean(1)[:, 0, n_special:]  # [B, N]
+        return attn.reshape(B, self.grid, self.grid).float().cpu().numpy()
+
     # ---------- 前向 ----------
     def _forward(self, batch: np.ndarray, want_attention: bool):
         torch = self.torch
         x = torch.from_numpy(batch).to(self.device)
-        with torch.inference_mode():
-            out = self.model(pixel_values=x, output_attentions=want_attention)
-        hidden = out.last_hidden_state  # [B, 1+N(+reg), C]
-        n_special = hidden.shape[1] - self.grid * self.grid
-        cls = hidden[:, 0]
-        patches = hidden[:, n_special:]
-        emb = torch.cat([cls, patches.mean(dim=1)], dim=-1)
-        emb = torch.nn.functional.normalize(emb, dim=-1).float().cpu().numpy()
-        attn_maps = None
-        if want_attention:
-            attn = out.attentions[-1]  # [B, heads, T, T]
-            cls_to_patch = attn[:, :, 0, n_special:].mean(dim=1)  # [B, N]
-            attn_maps = cls_to_patch.reshape(-1, self.grid, self.grid).float().cpu().numpy()
+        with self._forward_lock, torch.inference_mode():
+            out = self.model(pixel_values=x)
+            hidden = out.last_hidden_state  # [B, 1+N(+reg), C]
+            n_special = hidden.shape[1] - self.grid * self.grid
+            cls = hidden[:, 0]
+            patches = hidden[:, n_special:]
+            emb = torch.cat([cls, patches.mean(dim=1)], dim=-1)
+            emb = torch.nn.functional.normalize(emb, dim=-1).float().cpu().numpy()
+            attn_maps = self._cls_attention(n_special) if want_attention else None
         return emb, attn_maps
 
     def attention_box(self, attn_map: np.ndarray, orig_size: tuple[int, int]) -> Box | None:

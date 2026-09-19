@@ -1,95 +1,58 @@
 # Jewelry Structure Search
 
-本地珠宝结构索引原型。真实图库目录请在本机配置文件中设置，图片数据不随仓库发布。
+本地珠宝款式比对检索：客人给一张成品图（精修图、实拍图或草图），在几万张犀牛 / JCAD 渲染图里找出同款或大方向一致、可以改的款。
 
-## 1. 启动网页
+排序靠画面结构相似度（DINOv2 视觉向量，本地 GPU/CPU 计算），品类判断用 OpenAI 兼容视觉 API（可选，没有时用本地 CLIP 粗判）。图库、索引、密钥都只在本机，不随仓库发布。
+
+- 需求基线：`requirements.md`
+- 设计与技术拍板：`design.md`，评审回应：`design-review.md`
+- 给使用者的大白话说明：`使用说明.md`
+
+## 环境要求
+
+- Windows 10 / 11
+- Node.js 18+
+- Python 3.11（安装时勾选 Add to PATH；`py -3.11` 能运行即可）
+- NVIDIA 显卡可选。有就自动用（Pascal 及以上，脚本会自检），没有则用 CPU，第一次认图会慢很多
+
+## 第一次安装
+
+```text
+1. 复制 .env.example 为 .env，填入你的 OpenAI 兼容 API key / base url / 视觉模型名
+2. 复制 config.example.json 为 config.json，imageRoot 改成你的图库根目录（也可以之后在网页里扫描）
+3. 双击 安装.bat   ← 建 .venv、装依赖、装 torch（先 CPU 保底再试显卡版）、下载约 1 GB 模型
+```
+
+国内直连 huggingface.co 失败时脚本会自动改用 hf-mirror.com 重试；也可以在 `.env` 里写 `HF_ENDPOINT=https://hf-mirror.com`。模型下载过一次后，之后启动完全离线加载。
+
+## 日常使用
+
+```text
+双击 启动.bat → 浏览器打开 http://localhost:8787
+```
+
+1. 顶部「图库文件夹」登记图片所在的根目录（可多个）；「重新扫描全部」把这些目录在硬盘上的真实状态同步进 `data/images.json`（新增、删除、变动）
+2. 顶部「开始认图」给全库算向量（每批自动保存，可随时停、关窗口也不丢；P104-100 上约每秒 2～3 张，5 万张约 6 小时）
+3. 左侧上传客人图，点「找同款」；结果按相似度从高到低，最多 100 张
+4. 顶部橙色「没找到很像的同款」表示最高相似度低于阈值，下面是类似可改的款
+5. 品类判错时在下拉里改，点「按这个品类重搜」，不用重新上传
+6. 点「打开所在位置」在资源管理器里定位到这张图
+
+## 命令行工具（可选）
 
 ```powershell
-npm run scan
-npm run start
+npm run scan     # 命令行重扫全部已登记目录（config.imageRoot 未登记时顺带加入）
+npm run index    # 命令行认图（等价于网页按钮，方便过夜跑）
+npm run bench    # 抽 200 张实测速度并外推全库耗时
+npm run smoke    # 随机 20 张库图查自己，验证管线
+npm run eval     # 用 eval/pairs.json 里的真实对子评测名次（格式见 search_service/eval.py 顶部）
 ```
 
-然后打开：
+## 目录
 
 ```text
-http://localhost:8787
+src/              Node 服务：静态网页、/api/search、拉起 Python 内核、打开文件夹
+search_service/   Python 检索内核：DINOv2 向量、CLIP 品类、索引、查询、评测工具
+web/              网页
+data/             本机数据（images.json、index/、structure-tags.json）— 不入库
 ```
-
-## 2. 配置 OpenAI API key
-
-复制 `.env.example` 为 `.env`，然后把里面的 key 换成你的真实 key：
-
-```text
-OPENAI_API_KEY=your-api-key
-OPENAI_BASE_URL=https://api.openai.com/v1
-OPENAI_MODEL=gpt-4.1-mini
-OPENAI_API_MODE=chat
-```
-
-也可以只在当前 PowerShell 窗口临时设置：
-
-```powershell
-$env:OPENAI_API_KEY="your-api-key"
-$env:OPENAI_BASE_URL="https://api.openai.com/v1"
-$env:OPENAI_MODEL="gpt-4.1-mini"
-$env:OPENAI_API_MODE="chat"
-```
-
-如果使用 New API 这类 OpenAI 兼容中转服务，把 `OPENAI_BASE_URL` 改成你的 New API 地址，通常格式类似：
-
-```text
-OPENAI_API_KEY=your-newapi-token
-OPENAI_BASE_URL=http://你的NewAPI地址/v1
-OPENAI_MODEL=你的NewAPI里可用的视觉模型名
-OPENAI_API_MODE=chat
-```
-
-`OPENAI_API_MODE` 默认建议用 `chat`，因为大多数 New API 兼容的是 `/v1/chat/completions`。如果你直连官方 Responses API，再改成：
-
-```text
-OPENAI_API_MODE=responses
-```
-
-## 3. 批量给图库打结构标签
-
-建议先小批量测试：
-
-```powershell
-npm run tag:openai -- --limit 20
-```
-
-确认标签效果不错后再扩大：
-
-```powershell
-npm run repair:tags
-npm run compact:tags
-npm run tag:openai -- --limit 1000
-```
-
-生成的标签会写入：
-
-```text
-data\structure-tags.json
-```
-
-## 4. 重要说明
-
-当前版本不需要安装额外 npm 包，只依赖电脑已有的 Node.js。它支持 OpenAI 兼容的 `chat/completions` 和官方 `responses` 两种模式，搜索时优先匹配珠宝结构标签，而不是只看普通图片相似度。
-
-## 5. 大图处理
-
-如果图库里有很大的图片，New API 可能返回 `413 Request Entity Too Large`。项目支持安装 `sharp` 后自动把大图缩到适合上传的 JPG：
-
-```powershell
-npm install
-```
-
-可在 `.env` 调整压缩参数：
-
-```text
-MAX_IMAGE_BYTES=4194304
-MAX_IMAGE_SIDE=1600
-IMAGE_JPEG_QUALITY=82
-```
-
-没有安装 `sharp` 时，超大图片会被跳过并记录到 `data\tag-failures.json`，不会影响后续批量打标签。

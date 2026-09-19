@@ -1,7 +1,11 @@
 /* 同款检索新增样式；基础样式沿用 styles.css */
-.indexBar { display: flex; align-items: center; gap: 10px; margin-top: 6px; font-size: 13px; color: var(--muted); }
+.indexBar { display: flex; align-items: center; gap: 10px; margin-top: 6px; font-size: 13px; color: var(--muted); flex-wrap: wrap; }
+.topActions { display: flex; gap: 8px; align-items: flex-end; }
 button.small { padding: 4px 10px; font-size: 12px; }
 button.secondary { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+button.secondary:hover { background: rgba(20, 124, 116, 0.08); }
+button.danger { background: transparent; color: #9b2c2c; border: 1px solid #d9a3a3; padding: 2px 8px; font-size: 12px; min-height: 26px; }
+button.danger:hover { background: #fdf0f0; }
 button:disabled { opacity: 0.5; cursor: not-allowed; }
 .serviceNote { color: #a33; font-size: 13px; margin: 6px 0 0; min-height: 1em; }
 .categoryNote { font-size: 13px; color: var(--muted); margin: -6px 0 8px; min-height: 1em; }
@@ -14,3 +18,18 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .card .rank { position: absolute; top: 6px; left: 6px; background: rgba(0,0,0,0.55); color: #fff; font-size: 12px; padding: 2px 6px; border-radius: 6px; }
 .card { position: relative; }
 .openErr { color: #a33; font-size: 12px; }
+
+/* 图库文件夹面板 */
+.rootsPanel { margin-top: 16px; background: rgba(255, 254, 250, 0.78); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; }
+.rootsHeader { display: flex; align-items: baseline; gap: 12px; }
+.rootsHeader h2 { margin: 0; }
+.rootsHeader span { color: var(--muted); font-size: 13px; }
+.rootsPanel .hint { margin-top: 6px; }
+.rootsList { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 4px; }
+.rootsList li { display: grid; grid-template-columns: 70px 1fr auto; gap: 12px; align-items: center; padding: 6px 8px; border-radius: 6px; background: var(--panel); border: 1px solid var(--line); font-size: 13px; }
+.rootsList .n { text-align: right; font-variant-numeric: tabular-nums; color: var(--ink); }
+.rootsList .p { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rootsList li.missing .p { color: #9b2c2c; }
+.rootsList li.missing .p::after { content: "（现在找不到，可能硬盘没插）"; color: #9b2c2c; font-size: 12px; }
+.rootsAdd { display: flex; gap: 8px; margin-top: 10px; }
+.rootsAdd input { flex: 1; }

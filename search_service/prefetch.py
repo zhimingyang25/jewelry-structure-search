@@ -1,6 +1,7 @@
 """预下载模型（安装脚本调用），并自检 GPU。"""
 from __future__ import annotations
 
+import os
 import sys
 
 from .config import load_config, resolve_model_path
@@ -8,6 +9,10 @@ from .config import load_config, resolve_model_path
 
 def main() -> None:
     cfg = load_config()
+    if os.environ.get("HF_HUB_OFFLINE") == "1":
+        print("模型已在本机缓存，离线检查（不联网）")
+    elif os.environ.get("HF_ENDPOINT"):
+        print(f"从镜像下载：{os.environ['HF_ENDPOINT']}")
     import torch
 
     print(f"torch {torch.__version__}  CUDA 可用: {torch.cuda.is_available()}")

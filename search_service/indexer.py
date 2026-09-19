@@ -34,6 +34,7 @@ class Progress:
     rate_per_sec: float = 0.0
     message: str = ""
     error: str = ""
+    stop_requested: bool = False
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def snapshot(self) -> dict:
@@ -44,7 +45,7 @@ class Progress:
             return {
                 "running": self.running, "phase": self.phase, "done": self.done, "total": self.total,
                 "failed": self.failed, "rate_per_sec": round(self.rate_per_sec, 2), "eta_sec": eta,
-                "message": self.message, "error": self.error,
+                "message": self.message, "error": self.error, "stop_requested": self.stop_requested,
             }
 
 
@@ -94,16 +95,22 @@ class Indexer:
 
     def stop(self) -> None:
         self._stop.set()
+        self._set(stop_requested=True, message="正在停止，保存已认部分…")
 
-    def join(self) -> None:
+    def join(self, timeout: float | None = None) -> None:
         if self._thread:
-            self._thread.join()
+            self._thread.join(timeout)
 
     def pending_count(self) -> int:
         """images.json 里有、索引里没有的张数（按 path+size+mtime 快速估算，供状态行显示）。"""
         known = {(it["path"], it["size"], it["mtime_ms"]) for it in self.store.items}
         failed = set(self.store.failed)
         return sum(1 for im in load_catalog(self.cfg) if (im["path"], im["size"], im["mtime_ms"]) not in known and im["path"] not in failed)
+
+    def stale_count(self) -> int:
+        """索引里有、images.json 里已经没有的行数（文件被删或文件夹被移除后待清理）。"""
+        catalog_paths = {im["path"] for im in load_catalog(self.cfg)}
+        return sum(1 for it in self.store.items if it["path"] not in catalog_paths)
 
     # ---------- 主流程 ----------
     def _set(self, **kw) -> None:
@@ -115,7 +122,7 @@ class Indexer:
         cfg, store = self.cfg, self.store
         try:
             self._set(running=True, phase="scanning", done=0, total=0, failed=0, error="", message="正在对照图库清单…",
-                      started_at=time.time(), finished_at=None, rate_per_sec=0.0)
+                      started_at=time.time(), finished_at=None, rate_per_sec=0.0, stop_requested=False)
             if rebuild:
                 with self.store_lock:
                     store.wipe()
@@ -147,14 +154,16 @@ class Indexer:
 
             batch_imgs, batch_items, pending_since_flush = [], [], 0
             t0, n_done = time.time(), 0
+            last_flush = time.time()
 
             def flush():
-                nonlocal pending_since_flush
+                nonlocal pending_since_flush, last_flush
                 with self.store_lock:
                     self._set(phase="saving", message="正在写入索引…")
                     store.save()
                     self._set(phase="embedding")
                 pending_since_flush = 0
+                last_flush = time.time()
 
             def process_batch():
                 nonlocal n_done
@@ -218,8 +227,10 @@ class Indexer:
                     process_batch()
                     pending_since_flush += cfg.batch_size
                 elapsed = max(1e-6, time.time() - t0)
-                self._set(done=n_done, rate_per_sec=n_done / elapsed, message=f"已认 {n_done} / {len(todo)}")
-                if pending_since_flush >= cfg.flush_every:
+                if not self._stop.is_set():
+                    self._set(done=n_done, rate_per_sec=n_done / elapsed, message=f"已认 {n_done} / {len(todo)}")
+                # 按张数或按时间落盘，先到者为准：关窗口是硬杀，这里决定最多丢多少
+                if pending_since_flush >= cfg.flush_every or (pending_since_flush and time.time() - last_flush >= cfg.flush_seconds):
                     flush()
             process_batch()
             self._set(done=n_done)
@@ -240,11 +251,11 @@ class Indexer:
             self._set(phase="stopped" if self._stop.is_set() else "done",
                       message="已停止，已认部分已保存" if self._stop.is_set() else "认图完成")
         except Exception as exc:  # noqa: BLE001
-            self._set(phase="error", error=f"{type(exc).__name__}: {exc}", message="认图出错")
+            self._set(phase="error", error=f"{type(exc).__name__}: {exc}", message="认图出错，已认部分尝试保存")
             try:
                 with self.store_lock:
                     store.save()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as save_exc:  # noqa: BLE001
+                self._set(error=f"{type(exc).__name__}: {exc}；保存也失败：{type(save_exc).__name__}: {save_exc}")
         finally:
-            self._set(running=False, finished_at=time.time())
+            self._set(running=False, finished_at=time.time(), stop_requested=False)

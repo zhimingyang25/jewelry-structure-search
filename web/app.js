@@ -14,20 +14,32 @@ const categorySel = $("#category");
 const categoryNote = $("#categoryNote");
 const actionStatus = $("#actionStatus");
 const notice = $("#notice");
-const scanBtn = $("#scanBtn");
-const scanRoot = $("#scanRoot");
+const rootsToggleBtn = $("#rootsToggleBtn");
+const rescanBtn = $("#rescanBtn");
+const rootsPanel = $("#rootsPanel");
+const rootsList = $("#rootsList");
+const rootsSummary = $("#rootsSummary");
+const rootsStatus = $("#rootsStatus");
+const addRootInput = $("#addRootInput");
+const addRootBtn = $("#addRootBtn");
 
 const state = {
   dataUrl: "",
   queryId: "",
   status: null,
   busy: false,
+  scanning: false,
   pollTimer: null
 };
 
 function setActionStatus(message, tone = "") {
   actionStatus.textContent = message || "";
   actionStatus.className = `actionStatus${tone ? ` ${tone}` : ""}`;
+}
+
+function setRootsStatus(message, tone = "") {
+  rootsStatus.textContent = message || "";
+  rootsStatus.className = `actionStatus${tone ? ` ${tone}` : ""}`;
 }
 
 function readFileAsDataUrl(file) {
@@ -71,6 +83,10 @@ function post(path, body) {
   return api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
 }
 
+function escapeHtml(text) {
+  return String(text).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
 // ---------- 状态栏 ----------
 function fillCategories(labels) {
   if (categorySel.options.length > 1) return;
@@ -82,31 +98,53 @@ function fillCategories(labels) {
   }
 }
 
+function renderRoots(roots) {
+  const list = roots || [];
+  rootsSummary.textContent = list.length ? `${list.length} 个文件夹，共 ${list.reduce((n, r) => n + r.count, 0)} 张` : "还没有登记任何文件夹";
+  rootsList.innerHTML = list.map((r) => `
+    <li class="${r.exists ? "" : "missing"}">
+      <span class="n">${r.count} 张</span>
+      <span class="p" title="${escapeHtml(r.path)}">${escapeHtml(r.path)}</span>
+      <button class="danger removeRootBtn" data-root="${escapeHtml(r.path)}">移除</button>
+    </li>
+  `).join("");
+}
+
 function renderStatus(s) {
   state.status = s;
   fillCategories(s.categories);
+  renderRoots(s.roots);
   const idx = s.index || {};
   const devText = idx.device ? `${idx.model || ""}@${idx.inputSize || ""}px，${idx.device === "cuda" ? "显卡" : "CPU"}` : "";
-  statusEl.textContent = `图库 ${s.count} 张｜目录：${(s.imageRoots || []).length} 个`;
+  statusEl.textContent = `图库 ${s.count} 张｜${(s.roots || []).length} 个文件夹`;
   const parts = [`已认 ${idx.indexed ?? 0} / ${idx.total ?? s.count}`];
   if (idx.pending > 0) parts.push(`待认 ${idx.pending}`);
+  if (idx.stale > 0) parts.push(`待清理 ${idx.stale}`);
   if (idx.failed > 0) parts.push(`失败 ${idx.failed}`);
   if (devText) parts.push(devText);
   const ing = idx.indexing || {};
-  if (ing.running) {
+  if (ing.running && ing.stop_requested) {
+    parts.push(`正在停止，保存已认的 ${ing.done} 张…`);
+  } else if (ing.running) {
     const eta = ing.eta_sec != null ? `，预计还需 ${Math.max(1, Math.round(ing.eta_sec / 60))} 分钟` : "";
     parts.push(`认图中：${ing.done}/${ing.total}（${ing.rate_per_sec || 0} 张/秒${eta}）`);
   } else if (ing.phase === "error") {
     parts.push(`认图出错：${ing.error}`);
   } else if (ing.phase === "stopped") {
     parts.push("认图已停止，已认部分已保存");
+  } else if (ing.phase === "done") {
+    parts.push("认图完成");
   }
   indexText.textContent = parts.join("｜");
 
   const pyOk = s.services?.python === "ok";
-  indexStartBtn.hidden = !pyOk || ing.running || !(idx.pending > 0 || idx.indexed === 0);
-  indexStartBtn.textContent = idx.indexed === 0 ? "开始认图（第一次会很久）" : `认新图（${idx.pending} 张）`;
+  const needIndex = idx.pending > 0 || idx.stale > 0 || idx.indexed === 0;
+  indexStartBtn.hidden = !pyOk || ing.running || !needIndex;
+  indexStartBtn.textContent = idx.indexed === 0 ? "开始认图（第一次会很久）" : idx.pending > 0 ? `认新图（${idx.pending} 张）` : `清理已删除的图（${idx.stale} 张）`;
   indexStopBtn.hidden = !ing.running;
+  indexStopBtn.disabled = Boolean(ing.stop_requested);
+  indexStopBtn.textContent = ing.stop_requested ? "正在停止…" : "停止";
+  rescanBtn.disabled = state.scanning;
 
   let note = "";
   if (s.services?.python === "down") note = s.services.pythonError || "检索内核没有启动。请看 启动.bat 窗口里的报错。";
@@ -151,8 +189,8 @@ function renderResults(images) {
       <span class="rank">${i + 1}</span>
       <img src="/asset/${image.id}" loading="lazy" alt="">
       <div class="cardBody">
-        <div class="name" title="${image.path}">${image.file_name}</div>
-        <div class="meta">${image.folder || "."}</div>
+        <div class="name" title="${escapeHtml(image.path)}">${escapeHtml(image.file_name)}</div>
+        <div class="meta">${escapeHtml(image.folder || ".")}</div>
         <div class="score">相似度 ${Number(image.score).toFixed(3)}</div>
         <button class="openBtn" data-id="${image.id}">打开所在位置</button>
         <div class="openErr"></div>
@@ -179,7 +217,7 @@ async function runSearch({ reuse }) {
   }
   state.busy = true;
   searchBtn.disabled = researchBtn.disabled = true;
-  setActionStatus(reuse ? "正在按指定品类重搜…" : "正在识别品类并比对全库，通常十几秒…");
+  setActionStatus(reuse ? "正在按指定品类重搜…" : "正在识别品类并比对全库，通常十几秒到半分钟…");
   notice.hidden = true;
   try {
     let data;
@@ -218,7 +256,7 @@ async function runSearch({ reuse }) {
   }
 }
 
-// ---------- 事件 ----------
+// ---------- 事件：搜索 ----------
 upload.addEventListener("change", async () => {
   const file = upload.files?.[0];
   if (!file) return;
@@ -248,11 +286,12 @@ categorySel.addEventListener("change", () => {
   if (state.queryId) setActionStatus("已改品类，点「按这个品类重搜」生效。");
 });
 
+// ---------- 事件：认图 ----------
 indexStartBtn.addEventListener("click", async () => {
   try {
     indexStartBtn.disabled = true;
     await post("/api/index/start", {});
-    setActionStatus("已开始认图。可以一直开着，第一次可能要几小时；中途关掉下次会接着认。", "success");
+    setActionStatus("已开始认图。可以一直开着，第一次可能要几小时；每认一批会自动保存，中途关掉下次接着认。", "success");
   } catch (error) {
     setActionStatus(error.message, "error");
   } finally {
@@ -263,35 +302,92 @@ indexStartBtn.addEventListener("click", async () => {
 
 indexStopBtn.addEventListener("click", async () => {
   try {
+    indexStopBtn.disabled = true;
+    indexStopBtn.textContent = "正在停止…";
     await post("/api/index/stop", {});
-    setActionStatus("正在停止认图，已认部分会保存。");
+    setActionStatus("已收到停止请求，正在把已认的部分写盘，一般几秒内停下。");
   } catch (error) {
     setActionStatus(error.message, "error");
   }
   refreshStatus();
 });
 
-scanBtn.addEventListener("click", async () => {
+// ---------- 事件：图库文件夹 ----------
+function describeScan(result) {
+  const bits = [`现在共 ${result.count} 张`];
+  if (result.added) bits.push(`新增 ${result.added}`);
+  if (result.removed) bits.push(`移出 ${result.removed}（硬盘上已不在）`);
+  if (result.changed) bits.push(`更新 ${result.changed}`);
+  if (!result.added && !result.removed && !result.changed) bits.push("没有变化");
+  if (result.skippedRoots?.length) bits.push(`跳过 ${result.skippedRoots.length} 个找不到的文件夹`);
+  const pending = result.index?.pending ?? 0;
+  const stale = result.index?.stale ?? 0;
+  if (pending > 0) bits.push(`有 ${pending} 张还没认，点顶部「认新图」`);
+  else if (stale > 0) bits.push(`有 ${stale} 张已删除待清理，点顶部按钮`);
+  return bits.join("；") + "。";
+}
+
+async function rescan(addRoot = "") {
+  if (state.scanning) return;
+  state.scanning = true;
+  rescanBtn.disabled = addRootBtn.disabled = true;
+  const label = addRoot ? `正在扫描新文件夹并重扫全部…` : "正在重新扫描全部已登记文件夹，5 万张大约几秒到十几秒…";
+  setRootsStatus(label);
+  setActionStatus(label);
   try {
-    scanBtn.disabled = true;
-    const imageRoot = scanRoot.value.trim();
-    if (!imageRoot) {
-      setActionStatus("请先填写要扫描的图库文件夹路径。", "error");
-      return;
-    }
-    setActionStatus("正在扫描图库…");
-    const result = await post("/api/scan", { imageRoot });
-    scanRoot.value = result.imageRoot || imageRoot;
-    const pending = result.index?.pending ?? result.added;
-    setActionStatus(`扫描完成：当前 ${result.count} 张，比上次多 ${result.added} 张。${pending > 0 ? `有 ${pending} 张还没认，点上面「认新图」。` : ""}`, "success");
+    const result = await post("/api/scan", addRoot ? { addRoot } : {});
+    const text = describeScan(result);
+    setRootsStatus(text, "success");
+    setActionStatus(`扫描完成：${text}`, "success");
+    if (addRoot) addRootInput.value = "";
+    renderRoots(result.roots);
   } catch (error) {
+    setRootsStatus(error.message, "error");
     setActionStatus(error.message, "error");
   } finally {
-    scanBtn.disabled = false;
+    state.scanning = false;
+    rescanBtn.disabled = addRootBtn.disabled = false;
     refreshStatus();
   }
+}
+
+rootsToggleBtn.addEventListener("click", () => {
+  rootsPanel.hidden = !rootsPanel.hidden;
+  rootsToggleBtn.textContent = rootsPanel.hidden ? "图库文件夹" : "收起文件夹";
 });
 
+rescanBtn.addEventListener("click", () => rescan());
+
+addRootBtn.addEventListener("click", () => {
+  const value = addRootInput.value.trim();
+  if (!value) {
+    setRootsStatus("请先填写要新增的文件夹完整路径。", "error");
+    return;
+  }
+  rescan(value);
+});
+addRootInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") addRootBtn.click();
+});
+
+rootsList.addEventListener("click", async (event) => {
+  const button = event.target.closest(".removeRootBtn");
+  if (!button) return;
+  const root = button.dataset.root;
+  const count = state.status?.roots?.find((r) => r.path === root)?.count ?? 0;
+  if (!window.confirm(`把这个文件夹从图库里移除？\n${root}\n\n清单里它的 ${count} 张记录会移出（硬盘上的文件不会删）。之后点「认图」会顺便清掉它们的向量。`)) return;
+  try {
+    button.disabled = true;
+    const result = await post("/api/roots/remove", { root });
+    setRootsStatus(`已移除，移出 ${result.removed} 张记录，现在共 ${result.count} 张。${result.index?.stale > 0 ? `点顶部按钮清理 ${result.index.stale} 张向量。` : ""}`, "success");
+    renderRoots(result.roots);
+  } catch (error) {
+    setRootsStatus(error.message, "error");
+  }
+  refreshStatus();
+});
+
+// ---------- 事件：打开文件夹 ----------
 grid.addEventListener("click", async (event) => {
   const button = event.target.closest(".openBtn");
   if (!button) return;
@@ -304,6 +400,4 @@ grid.addEventListener("click", async (event) => {
   }
 });
 
-refreshStatus().then(() => {
-  if (state.status?.imageRoot) scanRoot.value = state.status.imageRoot;
-});
+refreshStatus();

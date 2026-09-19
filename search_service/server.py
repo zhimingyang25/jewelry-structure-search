@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import sys
 import threading
 import time
@@ -64,13 +65,17 @@ class App:
 
     @staticmethod
     def log(msg: str) -> None:
-        print(f"[search_service] {msg}", flush=True)
+        try:
+            print(f"[search_service] {msg}", flush=True)
+        except OSError:
+            pass  # Node 已退出、stdout 管道断了：日志写不出去不能影响存盘
 
     # ---------- 各接口 ----------
     def health(self) -> dict:
         from .indexer import load_catalog
 
         total = len(load_catalog(self.cfg))
+        running = self.indexer.progress.running
         return {
             "ok": True,
             "device": self.embedder.device,
@@ -80,7 +85,8 @@ class App:
             "variants": self.cfg.variants,
             "indexed": len(self.store.items),
             "total": total,
-            "pending": self.indexer.pending_count() if not self.indexer.progress.running else None,
+            "pending": self.indexer.pending_count() if not running else None,
+            "stale": self.indexer.stale_count() if not running else None,
             "failed": len(self.store.failed),
             "indexing": self.indexer.progress.snapshot(),
             "uptime_sec": int(time.time() - self.started),
@@ -191,7 +197,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"ok": ok, "indexing": self.app.indexer.progress.snapshot()})
             if self.path == "/index/stop":
                 self.app.indexer.stop()
-                return self._send(200, {"ok": True})
+                return self._send(200, {"ok": True, "indexing": self.app.indexer.progress.snapshot()})
+            if self.path == "/shutdown":
+                # Node 退出前调用：停认图、等保存完（最多 body.wait_sec 秒），再由 Node 杀进程
+                self.app.indexer.stop()
+                self.app.indexer.join(timeout=float(body.get("wait_sec", 20)))
+                return self._send(200, {"ok": True, "saved": not self.app.indexer.progress.running})
             if self.path == "/reload-index":
                 with self.app.indexer.store_lock:
                     self.app.store = IndexStore(self.app.cfg).load()
@@ -209,24 +220,78 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(500, {"error": f"{type(exc).__name__}: {exc}"})
 
 
+class KernelServer(ThreadingHTTPServer):
+    # HTTPServer 默认 allow_reuse_address=True；在 Windows 上这等于 SO_REUSEADDR，会让第二个内核
+    # 静默地绑到同一个端口，请求被随机分给新旧两个进程。必须关掉，让第二个实例明确报「端口被占用」。
+    allow_reuse_address = False
+
+
+def _watch_parent(app: App, parent_pid: int | None) -> None:
+    """Node 没了（关窗口、任务管理器杀掉、崩溃）就把认图停下、存盘、退出，不留孤儿进程占着端口和显存。
+
+    Python 由 Node 以 detached 方式拉起，自己没有控制台，收不到关窗口事件，所以生死只看 Node。
+    注意 .venv\\Scripts\\python.exe 在 Windows 上是个转发器，真正的解释器是它的子进程，
+    os.getppid() 拿到的是转发器而不是 Node，所以 Node 必须用 --parent-pid 把自己的 PID 传进来。
+    """
+    pid = parent_pid or os.getppid()
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            from ctypes import wintypes
+
+            k32 = ctypes.windll.kernel32
+            k32.OpenProcess.restype = wintypes.HANDLE
+            k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            k32.WaitForSingleObject.restype = wintypes.DWORD
+            k32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+            handle = k32.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE
+            if not handle:
+                App.log(f"无法监视父进程 {pid}（错误 {k32.GetLastError()}），Node 退出后本进程不会自动退出")
+                return
+            k32.WaitForSingleObject(handle, 0xFFFFFFFF)  # INFINITE
+        else:
+            while os.getppid() == pid:
+                time.sleep(1)
+    except Exception as exc:  # noqa: BLE001
+        App.log(f"父进程监视异常：{exc}")
+        return
+    App.log(f"父进程 {pid} 已退出，停止认图并保存…")
+    app.indexer.stop()
+    app.indexer.join(timeout=120)
+    App.log("已保存，退出")
+    os._exit(0)
+
+
 def main() -> None:
     cfg = load_config()
     port = cfg.port
+    parent_pid = None
     for a in sys.argv[1:]:
         if a.startswith("--port="):
             port = int(a.split("=", 1)[1])
+        elif a.startswith("--parent-pid="):
+            parent_pid = int(a.split("=", 1)[1])
     app = App(cfg)
     Handler.app = app
     try:
-        server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+        server = KernelServer(("127.0.0.1", port), Handler)
     except OSError as exc:
         App.log(f"端口 {port} 被占用或无法监听：{exc}。请关闭占用该端口的程序，或在 config.json 的 searchService.port 换一个端口。")
         sys.exit(2)
+    if parent_pid:
+        threading.Thread(target=_watch_parent, args=(app, parent_pid), daemon=True, name="parent-watch").start()
     App.log(f"listening http://127.0.0.1:{port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
+    finally:
+        # Ctrl+C 或 Node 请求关闭：让认图线程停下并把已认部分写盘，再退出
+        if app.indexer.progress.running:
+            App.log("正在停止认图并保存…")
+            app.indexer.stop()
+            app.indexer.join(timeout=60)
+            App.log("已保存，退出")
 
 
 if __name__ == "__main__":

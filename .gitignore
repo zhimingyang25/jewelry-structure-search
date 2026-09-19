@@ -5,8 +5,9 @@ node_modules/
 .env.*
 .env*
 *.env
+!.env.example
 
-# Local configuration
+# Local configuration (config.example.json is the template and stays tracked)
 config.json
 
 # Real local data
@@ -33,3 +34,7 @@ __pycache__/
 IMPLEMENT-PROMPT.md
 docs/metadata.json
 run.bat
+data/index-test/
+
+# Playwright MCP session artifacts
+.playwright-mcp/

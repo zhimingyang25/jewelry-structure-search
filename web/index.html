@@ -20,10 +20,24 @@
           </div>
           <p id="serviceNote" class="serviceNote"></p>
         </div>
-        <div class="searchbox">
-          <input id="scanRoot" placeholder="图库文件夹路径，例如 D:\your-jewelry-images">
-          <button id="scanBtn">扫描图库</button>
+        <div class="topActions">
+          <button id="rootsToggleBtn" class="secondary">图库文件夹</button>
+          <button id="rescanBtn">重新扫描全部</button>
         </div>
+      </section>
+
+      <section id="rootsPanel" class="rootsPanel" hidden>
+        <div class="rootsHeader">
+          <h2>已登记的图库文件夹</h2>
+          <span id="rootsSummary"></span>
+        </div>
+        <p class="hint">「重新扫描全部」会把这些文件夹在硬盘上的真实情况同步进清单：新图加入、删掉的移出、改过的更新。之后点顶部「认新图」。硬盘暂时没插的文件夹会跳过，不会误删。</p>
+        <ul id="rootsList" class="rootsList"></ul>
+        <div class="rootsAdd">
+          <input id="addRootInput" placeholder="要新增的文件夹完整路径，例如 E:\渲染图\2026新款">
+          <button id="addRootBtn">添加并扫描</button>
+        </div>
+        <div id="rootsStatus" class="actionStatus"></div>
       </section>
 
       <section class="workspace">

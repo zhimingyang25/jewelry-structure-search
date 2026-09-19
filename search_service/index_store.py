@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import shutil
+import time
 from pathlib import Path
 
 import numpy as np
@@ -43,10 +44,22 @@ def file_sha1(path: str, chunk: int = 1 << 20) -> tuple[str, bytes]:
     return h.hexdigest(), bytes(buf)
 
 
+def _replace_with_retry(tmp: Path, path: Path, tries: int = 6) -> None:
+    """Windows 上目标文件若被杀毒软件或其它句柄短暂占用，os.replace 会抛 PermissionError；等一下再试。"""
+    for i in range(tries):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if i == tries - 1:
+                raise
+            time.sleep(0.5 * (i + 1))
+
+
 def _atomic_write_bytes(path: Path, data: bytes) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_bytes(data)
-    os.replace(tmp, path)
+    _replace_with_retry(tmp, path)
 
 
 def _atomic_write_json(path: Path, obj) -> None:
@@ -57,7 +70,7 @@ def _atomic_save_npy(path: Path, arr: np.ndarray) -> None:
     tmp = path.with_suffix(".npy.tmp")
     with open(tmp, "wb") as f:
         np.save(f, arr)
-    os.replace(tmp, path)
+    _replace_with_retry(tmp, path)
 
 
 class IndexStore:
@@ -109,13 +122,15 @@ class IndexStore:
             if not p.exists():
                 n = 0
                 break
-            arr = np.load(p, mmap_mode="r")
+            # 整个读进内存，不用 mmap：Windows 上被映射着的文件无法被 os.replace 覆盖，会让后续保存全部失败。
+            # 5 万张 × 4 路 × 1536 维 float32 ≈ 1.2 GB，设计预算之内。
+            arr = np.load(p)
             arrays[v] = arr
             n = min(n, arr.shape[0])
         self.items = items[:n]
         self.vectors = {v: np.ascontiguousarray(arr[:n]) for v, arr in arrays.items()}
         if self.clip_vec_path.exists():
-            c = np.load(self.clip_vec_path, mmap_mode="r")
+            c = np.load(self.clip_vec_path)
             self.clip_vectors = np.ascontiguousarray(c[: min(n, c.shape[0])])
             if self.clip_vectors.shape[0] < n:
                 self.clip_vectors = None

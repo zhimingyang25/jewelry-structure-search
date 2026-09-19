@@ -64,7 +64,12 @@ echo    显卡版都不可用，退回 CPU 版
 "%PY%" -m pip install "torch==2.7.1" --index-url https://download.pytorch.org/whl/cpu -q --force-reinstall --no-deps
 
 :models
-echo [5/5] 下载模型（约 1 GB，第一次较慢；国内可在 .env 里加 HF_ENDPOINT=https://hf-mirror.com）...
+echo [5/5] 下载模型（约 1 GB，第一次较慢；已下载过则只做离线检查）...
+"%PY%" -m search_service.prefetch
+if not errorlevel 1 goto :finish
+echo.
+echo    直连 huggingface.co 失败，改用国内镜像 hf-mirror.com 再试一次...
+set HF_ENDPOINT=https://hf-mirror.com
 "%PY%" -m search_service.prefetch
 if errorlevel 1 (
   echo.
@@ -74,6 +79,7 @@ if errorlevel 1 (
   pause & exit /b 1
 )
 
+:finish
 echo.
 echo ==========================================
 echo  安装完成。接下来双击 启动.bat

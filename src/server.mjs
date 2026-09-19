@@ -4,7 +4,7 @@ import http from "node:http";
 import path from "node:path";
 import { dataPath, loadConfig, loadEnv, mimeFromPath, readJson, writeJson } from "./common.mjs";
 import { detectCategoryAndBox } from "./category-client.mjs";
-import { mergeCatalogs, scanImages } from "./scanner.mjs";
+import { removeRoot, rescanCatalog, summarizeRoots } from "./scanner.mjs";
 
 loadEnv();
 let config = loadConfig();
@@ -16,9 +16,10 @@ const requestedPort = Number(env.PORT || config.port || 8787);
 let currentPort = requestedPort;
 
 const search = config.searchService || {};
-const SEARCH_PORT = Number(search.port || 8788);
+const SEARCH_PORT = Number(env.SEARCH_PORT || search.port || 8788); // SEARCH_PORT 环境变量便于并行起第二套做测试
 const SEARCH_URL = `http://127.0.0.1:${SEARCH_PORT}`;
-const GPT_TIMEOUT = Number(search.gptTimeoutMs || 12000);
+// 视觉 API 经中转站走一次通常 20～30 秒（实测 6 个模型均 >12 秒），需求允许整次查询「十几秒到半分钟」。
+const GPT_TIMEOUT = Number(search.gptTimeoutMs || 30000);
 const SEARCH_TIMEOUT = Number(search.searchTimeoutMs || 60000);
 
 // 品类组（与 search_service/config.py 的默认表一致；前端下拉用中文名）
@@ -47,9 +48,12 @@ function startPython() {
     console.log(`[search] ${pythonState.lastError}`);
     return;
   }
-  pythonProc = childProcess.spawn(exe, ["-m", "search_service.server", `--port=${SEARCH_PORT}`], {
+  pythonProc = childProcess.spawn(exe, ["-m", "search_service.server", `--port=${SEARCH_PORT}`, `--parent-pid=${globalThis.process.pid}`], {
     cwd: path.resolve("."),
     stdio: ["ignore", "pipe", "pipe"],
+    // detached：让 Python 不挂在这个控制台上。否则用户关掉窗口时 Windows 会立刻杀掉 Python，
+    // 正在认的图来不及存盘。分离后 Python 自己盯着 Node 进程，Node 没了就停认图、存盘、退出。
+    detached: true,
     windowsHide: true,
     env: { ...globalThis.process.env, PYTHONIOENCODING: "utf-8", PYTHONUNBUFFERED: "1" }
   });
@@ -77,10 +81,26 @@ function stopPython() {
     }
   }
 }
-for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+
+let shuttingDown = false;
+async function shutdown() {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  // 先让 Python 把正在认的图存盘（最多等 20 秒），再杀进程；直接杀会丢掉最后一段
+  if (pythonProc && !pythonProc.killed) {
+    try {
+      const r = await pyFetch("/shutdown", { wait_sec: 20 }, 25000);
+      if (r && r.saved === false) console.log("[search] 认图仍在保存，强制结束可能丢掉最后一批");
+    } catch {
+      /* Python 已经不在了或没响应，直接杀 */
+    }
+  }
+  stopPython();
+  globalThis.process.exit(0);
+}
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP", "SIGBREAK"]) {
   globalThis.process.on(signal, () => {
-    stopPython();
-    globalThis.process.exit(0);
+    shutdown();
   });
 }
 globalThis.process.on("exit", stopPython);
@@ -176,6 +196,7 @@ async function buildStatus() {
         indexed: health.indexed,
         total,
         pending: health.pending ?? Math.max(0, total - health.indexed),
+        stale: health.stale ?? 0,
         failed: health.failed,
         model: health.model,
         inputSize: health.input_size,
@@ -183,11 +204,13 @@ async function buildStatus() {
         signature: health.signature,
         indexing: health.indexing
       }
-    : { ready: false, indexed: 0, total, pending: total, failed: 0, indexing: { running: false } };
+    : { ready: false, indexed: 0, total, pending: total, stale: 0, failed: 0, indexing: { running: false } };
   return {
     imageRoot: catalog.imageRoot || config.imageRoot,
     imageRoots: catalog.imageRoots || (catalog.imageRoot ? [catalog.imageRoot] : []),
+    roots: summarizeRoots(catalog),
     count: total,
+    scannedAt: catalog.scannedAt || null,
     hasOpenAiKey: hasKey,
     categories: CATEGORY_LABELS,
     services: {
@@ -199,7 +222,39 @@ async function buildStatus() {
   };
 }
 
+// ---------- 扫描图库 ----------
+// 语义：清单 = 全部已登记根目录在磁盘上的真实状态。每次都重扫全部根目录，新增、删除、变动一起同步；
+// 可以顺带登记一个新根目录。单个根目录暂时找不到（移动硬盘没插）时保留它的记录不误删。
+function handleScan(body) {
+  const addRoot = String(body.addRoot || body.imageRoot || "").trim() || null;
+  const previousCount = catalog.images?.length || 0;
+  const result = rescanCatalog(catalog, { addRoot, extensions: config.imageExtensions });
+  writeCatalog(result.catalog);
+  if (addRoot) saveConfig({ ...config, imageRoot: result.catalog.imageRoots.find((r) => r.toLowerCase() === addRoot.toLowerCase()) || addRoot });
+  return {
+    ok: true,
+    previousCount,
+    count: result.catalog.count,
+    added: result.added,
+    removed: result.removed,
+    changed: result.changed,
+    skippedRoots: result.skippedRoots,
+    roots: summarizeRoots(result.catalog),
+    scannedAt: result.catalog.scannedAt
+  };
+}
+
 // ---------- 搜索 ----------
+function describeGptError(error) {
+  if (error.name === "AbortError") return `视觉 API 超过 ${Math.round(GPT_TIMEOUT / 1000)} 秒没回应`;
+  const msg = String(error.message || "");
+  if (/\b401\b|invalid token|invalid api key|unauthorized/i.test(msg)) return "视觉 API 拒绝了这个 key（401），请检查 .env 里的 OPENAI_API_KEY";
+  if (/\b404\b|model.*not.*(found|exist)|does not exist/i.test(msg)) return `视觉 API 找不到模型 ${env.OPENAI_MODEL || ""}，请检查 .env 里的 OPENAI_MODEL`;
+  if (/\b429\b|rate limit|quota/i.test(msg)) return "视觉 API 限流或额度用完（429）";
+  if (/ECONNREFUSED|ENOTFOUND|EAI_AGAIN|fetch failed/i.test(msg)) return `连不上视觉 API（${env.OPENAI_BASE_URL || "未配置地址"}）`;
+  return msg.length > 160 ? `${msg.slice(0, 160)}…` : msg;
+}
+
 async function handleSearch(body) {
   const t0 = Date.now();
   const limit = Math.min(Number(body.limit || config.topK || 100), 300);
@@ -219,7 +274,7 @@ async function handleSearch(body) {
     try {
       detected = await detectCategoryAndBox({ imageDataUrl, timeoutMs: GPT_TIMEOUT });
     } catch (error) {
-      gptError = error.name === "AbortError" ? "视觉识别超时" : error.message;
+      gptError = describeGptError(error);
     }
   } else if (imageDataUrl && !env.OPENAI_API_KEY) {
     gptError = "未配置 OPENAI_API_KEY";
@@ -292,30 +347,29 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === "/api/scan" && req.method === "POST") {
       const bodyText = await readBody(req);
       const body = bodyText ? JSON.parse(bodyText) : {};
-      const previousCount = catalog.images?.length || 0;
-      const requestedRoot = String(body.imageRoot || "").trim();
-      const append = body.append !== false;
-      if (requestedRoot) {
-        if (!fs.existsSync(requestedRoot) || !fs.statSync(requestedRoot).isDirectory()) {
-          sendJson(res, { error: `扫描目录不存在或不是文件夹：${requestedRoot}` }, 400);
-          return;
-        }
-        saveConfig({ ...config, imageRoot: requestedRoot });
+      try {
+        const result = handleScan(body);
+        const status = await buildStatus();
+        sendJson(res, { ...result, index: status.index });
+      } catch (error) {
+        sendJson(res, { error: error.message }, 400);
       }
-      const scannedCatalog = scanImages(config);
-      const nextCatalog = append ? mergeCatalogs(catalog, scannedCatalog) : scannedCatalog;
-      writeCatalog(nextCatalog);
+      return;
+    }
+    if (url.pathname === "/api/roots/remove" && req.method === "POST") {
+      const body = JSON.parse(await readBody(req));
+      const target = String(body.root || "").trim();
+      if (!target) {
+        sendJson(res, { error: "缺少要移除的文件夹路径" }, 400);
+        return;
+      }
+      const result = removeRoot(catalog, target);
+      writeCatalog(result.catalog);
+      if (config.imageRoot && path.resolve(config.imageRoot) === path.resolve(target)) {
+        saveConfig({ ...config, imageRoot: result.catalog.imageRoot || "" });
+      }
       const status = await buildStatus();
-      sendJson(res, {
-        ok: true,
-        previousCount,
-        count: nextCatalog.count,
-        added: Math.max(0, nextCatalog.count - previousCount),
-        imageRoot: nextCatalog.imageRoot,
-        imageRoots: nextCatalog.imageRoots || (nextCatalog.imageRoot ? [nextCatalog.imageRoot] : []),
-        scannedAt: nextCatalog.scannedAt,
-        index: status.index
-      });
+      sendJson(res, { ok: true, removed: result.removed, count: result.catalog.count, roots: summarizeRoots(result.catalog), index: status.index });
       return;
     }
     if (url.pathname.startsWith("/asset/")) {
@@ -381,6 +435,7 @@ const server = http.createServer(async (req, res) => {
 server.on("error", (error) => {
   if (error.code === "EADDRINUSE") {
     currentPort += 1;
+    if (currentPort === SEARCH_PORT) currentPort += 1; // 别撞上 Python 检索内核的端口
     console.log(`Port is busy, retrying on http://localhost:${currentPort}`);
     server.listen(currentPort);
     return;
